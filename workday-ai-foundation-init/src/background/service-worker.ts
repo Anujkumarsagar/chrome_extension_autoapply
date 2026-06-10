@@ -414,7 +414,7 @@ Return ONLY a valid JSON object. No markdown block wraps, no explanation text.`;
       (async () => {
         try {
           const settings = await getSettings();
-          const { label, description, options, containerHtml, resumeJson } = message.payload;
+          const { label, description, options, containerHtml, resumeJson, pageContext } = message.payload;
 
           // Compute deterministic cache key
           const cacheOptionsKey = options && options.length > 0 ? options.join('|') : '';
@@ -508,8 +508,9 @@ Description / Helper Text: ${description || 'None'}
 Field Type Hint: ${options && options.length > 0 ? 'DROPDOWN/SELECT/RADIO' : 'FREE TEXT'}
 Available Options: ${options && options.length > 0 ? JSON.stringify(options, null, 2) : 'None — free text input'}
 ${containerHtml ? `\nDOM Context (field HTML structure):\n${containerHtml}` : ''}
+${pageContext && pageContext.length > 0 ? `\n════════════════════════════════════\nNEIGHBORING FIELDS & CURRENT VALUES ON FORM\n════════════════════════════════════\n${JSON.stringify(pageContext, null, 2)}` : ''}
 
-Instruction: Analyse the resume and provide the best possible value for this specific field. Follow the output contract exactly.`;
+Instruction: Analyse the resume and provide the best possible value for this specific field. Pay close attention to the NEIGHBORING FIELDS to understand the context (for example, if a neighboring field is filled with a specific school name or company name, this field is related to that school or company). Follow the output contract exactly.`;
 
           logger.info(`Analyzing field: "${label}" using LLM (${settings.provider})...`);
           const matchResult = await callLLM(settings, systemPrompt, userPrompt, true);

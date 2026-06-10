@@ -121,6 +121,35 @@ async function queryAIForField(
     ? cleanDOMContext(field.container)
     : undefined;
 
+  // Scan all fields on the page to build the context of neighboring fields
+  const allFields = detectFormFields();
+  const pageContext = allFields
+    .map(f => {
+      let val = '';
+      if (f.element) {
+        if (f.type === 'text' || f.type === 'textarea') {
+          val = (f.element as HTMLInputElement).value || '';
+        } else if (f.type === 'select') {
+          const selectVal = f.element.textContent || '';
+          const lowerVal = selectVal.trim().toLowerCase();
+          // Exclude default placeholder prompts
+          if (lowerVal !== '' && !lowerVal.includes('select') && !lowerVal.includes('search')) {
+            val = selectVal;
+          }
+        } else if (f.type === 'checkbox') {
+          val = (f.element as HTMLInputElement).checked ? 'checked' : 'unchecked';
+        } else if (f.type === 'radio') {
+          const checked = f.container.querySelector('input[type="radio"]:checked');
+          val = checked ? (checked as HTMLInputElement).value || 'selected' : '';
+        }
+      }
+      return {
+        label: f.label,
+        value: val.trim()
+      };
+    })
+    .filter(ctx => ctx.label !== field.label && ctx.value !== ''); // exclude current field and empty fields
+
   const payload = {
     type: MessageType.ANALYZE_QUESTION,
     payload: {
@@ -128,7 +157,8 @@ async function queryAIForField(
       description: field.description || undefined,
       options: availableOptions && availableOptions.length > 0 ? availableOptions : undefined,
       containerHtml,
-      resumeJson
+      resumeJson,
+      pageContext
     }
   };
 
@@ -303,6 +333,12 @@ async function waitForPageTransition(): Promise<boolean> {
   
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 200));
+
+    // Check for validation error banner to fail-fast
+    const errorHeading = document.querySelector('[data-automation-id="errorHeading"]');
+    if (errorHeading) {
+      return false; 
+    }
     
     if (window.location.href !== startUrl) {
       logToExtension('info', 'Page transition detected (URL changed).');
@@ -337,7 +373,10 @@ async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
   let filled = 0;
   let skipped = 0;
   let failed = 0;
-  let consecutiveErrors = 0;
+
+  // ─── Phase 1: Fast Heuristic Pass ──────────────────────────────────────────
+  logToExtension('info', 'Phase 1: Running fast local heuristic matching...');
+  const fieldsToQueryAI: FieldInfo[] = [];
 
   for (let i = 0; i < fields.length; i++) {
     if (shouldStop) {
@@ -357,31 +396,57 @@ async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
       continue;
     }
 
-    logToExtension('info', `[${i + 1}/${fields.length}] Processing field: "${field.label || field.automationId || 'unlabelled'}" (${field.type})`);
-
-    // ── Step 1: Heuristic mapping ──
+    // Heuristic mapping
     const heuristicResult = mapFieldHeuristically(field, resume);
-
-    let finalValue: string | null = null;
-    let source = 'heuristic';
 
     // confidence=100 + value=null → explicit skip (e.g. SMS opt-in, phone extension)
     if (heuristicResult.value === null && heuristicResult.confidence === 100) {
       skipped++;
       logToExtension('debug', `⟳ Intentional skip for "${field.label}" (field excluded by rules).`);
-      await new Promise(r => setTimeout(r, 60));
       continue;
     }
 
     if (heuristicResult.value !== null && heuristicResult.confidence >= 70) {
-      finalValue = Array.isArray(heuristicResult.value)
+      const finalValue = Array.isArray(heuristicResult.value)
         ? heuristicResult.value.join(', ')
         : heuristicResult.value;
       logToExtension('debug', `Heuristic match for "${field.label}": "${finalValue}" (confidence: ${heuristicResult.confidence}%)`);
+      
+      const success = await applyValueToField(field, finalValue);
+      if (success) {
+        filled++;
+        logToExtension('info', `✔ Filled "${field.label}" via heuristic.`);
+      } else {
+        failed++;
+        logToExtension('warn', `✘ Failed to fill "${field.label}" with heuristic value: "${finalValue}".`);
+      }
     } else {
-      // ── Step 2: LLM fallback ──
-      logToExtension('info', `Low heuristic confidence (${heuristicResult.confidence}%) for "${field.label}". Querying AI...`);
-      source = 'llm';
+      // Defer to LLM pass
+      fieldsToQueryAI.push(field);
+    }
+  }
+
+  // ─── Phase 2: AI / LLM Pass ────────────────────────────────────────────────
+  if (fieldsToQueryAI.length > 0) {
+    logToExtension('info', `Phase 2: Querying AI for ${fieldsToQueryAI.length} remaining fields...`);
+    let consecutiveErrors = 0;
+
+    for (let i = 0; i < fieldsToQueryAI.length; i++) {
+      if (shouldStop) {
+        logToExtension('warn', 'Autofill stopped by user request.');
+        syncStatus('paused', 100);
+        return false;
+      }
+
+      const field = fieldsToQueryAI[i];
+
+      // Double check if field was filled manually or by side-effects during Phase 1
+      if (hasExistingValue(field)) {
+        skipped++;
+        continue;
+      }
+
+      logToExtension('info', `[AI ${i + 1}/${fieldsToQueryAI.length}] Querying AI for field: "${field.label || field.automationId || 'unlabelled'}"`);
 
       // For dropdowns, pre-scrape available options to give the LLM full context
       let availableOptions: string[] | undefined;
@@ -396,12 +461,14 @@ async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
         logToExtension('warn', `⚠ AI call failed for "${field.label}" (no response from background). Check API key / model settings.`);
         consecutiveErrors++;
         if (consecutiveErrors >= 3) {
-          logToExtension('error', 'Too many consecutive AI errors or timeouts. Pausing autofill.');
-          syncStatus('paused', Math.round((i / fields.length) * 100));
+          logToExtension('error', 'Too many consecutive AI errors or timeouts. Pausing.');
+          syncStatus('paused', 100);
           return false;
         }
       } else {
         consecutiveErrors = 0;
+        let finalValue: string | null = null;
+
         if (llmResult.value && llmResult.confidence >= 40) {
           finalValue = llmResult.value;
           logToExtension('info', `AI answer for "${field.label}": "${finalValue}" (confidence: ${llmResult.confidence}%) — ${llmResult.reasoning}`);
@@ -410,26 +477,26 @@ async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
         } else {
           logToExtension('warn', `AI confidence too low (${llmResult.confidence}%) for "${field.label}". Skipping.`);
         }
-      }
-    }
 
-    // ── Step 3: Apply value or skip ──
-    if (finalValue !== null && finalValue.trim() !== '') {
-      const success = await applyValueToField(field, finalValue);
-      if (success) {
-        filled++;
-        logToExtension('info', `✔ Filled "${field.label}" via ${source}.`);
-      } else {
-        failed++;
-        logToExtension('warn', `✘ Failed to fill "${field.label}" (value: "${finalValue}", source: ${source}).`);
+        // Apply value or skip
+        if (finalValue !== null && finalValue.trim() !== '') {
+          const success = await applyValueToField(field, finalValue);
+          if (success) {
+            filled++;
+            logToExtension('info', `✔ Filled "${field.label}" via AI.`);
+          } else {
+            failed++;
+            logToExtension('warn', `✘ Failed to fill "${field.label}" (value: "${finalValue}" via AI).`);
+          }
+        } else {
+          skipped++;
+          logToExtension('debug', `⟳ Skipped "${field.label}" — no usable AI value.`);
+        }
       }
-    } else {
-      skipped++;
-      logToExtension('debug', `⟳ Skipped "${field.label}" — no usable value found.`);
-    }
 
-    // Small delay between fields to avoid overwhelming the page
-    await new Promise(r => setTimeout(r, 120));
+      // Small delay between fields to avoid UI lag
+      await new Promise(r => setTimeout(r, 120));
+    }
   }
 
   logToExtension('info', `Form section completed — Filled: ${filled} | Skipped: ${skipped} | Failed: ${failed} out of ${fields.length} fields.`);
@@ -449,6 +516,15 @@ async function runAutofillLoop(resume: StructuredResume): Promise<void> {
   while (isRunning && !shouldStop) {
     const stepName = getCurrentStepName();
     logToExtension('info', `Form section identified: "${stepName}"`);
+
+    // Check for active validation errors from a previous attempt
+    const errorHeading = document.querySelector('[data-automation-id="errorHeading"]');
+    if (errorHeading) {
+      const errorMsg = errorHeading.textContent || 'Validation error';
+      logToExtension('error', `Validation error active on page: "${errorMsg.trim()}". Pausing autofill for manual correction.`);
+      syncStatus('paused', 100);
+      break;
+    }
 
     // 1. Process and autofill the current page
     const success = await processCurrentPage(resume);
@@ -507,6 +583,16 @@ async function runAutofillLoop(resume: StructuredResume): Promise<void> {
     // 5. Wait for the page transition to complete
     logToExtension('info', 'Waiting for page navigation to update...');
     const transitioned = await waitForPageTransition();
+    
+    // Check if transition failed because of an error heading
+    const errorHeadingAfterClick = document.querySelector('[data-automation-id="errorHeading"]');
+    if (errorHeadingAfterClick) {
+      const errorMsg = errorHeadingAfterClick.textContent || 'Validation error';
+      logToExtension('error', `Validation error active after clicking Continue: "${errorMsg.trim()}". Pausing autofill for manual correction.`);
+      syncStatus('paused', 100);
+      break;
+    }
+
     if (!transitioned) {
       logToExtension('warn', 'Page navigation transition timed out. Re-evaluating current page fields...');
     }

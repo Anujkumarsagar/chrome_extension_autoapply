@@ -25,6 +25,7 @@ export interface AnalyzeQuestionPayload {
   options?: string[];
   containerHtml?: string;
   resumeJson: StructuredResume;
+  pageContext?: Array<{ label: string; value: string }>;
 }
 
 export interface SyncStatusPayload {
