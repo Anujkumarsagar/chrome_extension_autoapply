@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mock Workday Jobs Career Site</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f5f5f5;
+      color: #333;
+      padding: 40px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    .card {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 24px;
+      color: #0854a0;
+      margin-bottom: 8px;
+    }
+    h2 {
+      font-size: 18px;
+      border-bottom: 1px dashed #ccc;
+      padding-bottom: 6px;
+      margin-top: 24px;
+      color: #555;
+    }
+    .form-group {
+      margin-bottom: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    label {
+      font-size: 13px;
+      font-weight: bold;
+      color: #444;
+    }
+    .input-text {
+      padding: 8px 12px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
+      outline: none;
+    }
+    .input-text:focus {
+      border-color: #0854a0;
+    }
+    /* Simulated Workday custom combobox */
+    .wd-combobox {
+      position: relative;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 8px 12px;
+      background: white;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      user-select: none;
+    }
+    .wd-options-list {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: white;
+      border: 1px solid #ccc;
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      z-index: 1000;
+      max-height: 200px;
+      overflow-y: auto;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+    }
+    .wd-option {
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .wd-option:hover {
+      background-color: #f0f0f0;
+    }
+    .btn-group {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 30px;
+    }
+    .btn {
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: bold;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background-color: #0854a0;
+      color: white;
+    }
+    .btn-primary:hover {
+      background-color: #064080;
+    }
+    .repeatable-section {
+      border: 1px solid #e0e0e0;
+      padding: 16px;
+      border-radius: 6px;
+      background: #fafafa;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <div style="display: flex; align-items: center; justify-content: space-between;">
+      <h1>Mock Careers Portal</h1>
+      <span style="font-size: 12px; color: #777;">Step 1 of 3</span>
+    </div>
+    <p style="font-size: 13px; color: #666; margin-bottom: 24px;">Please complete the form details. All required fields are marked with an asterisk (*)</p>
+
+    <form id="mock-form" onsubmit="event.preventDefault(); alert('Form submitted successfully!');">
+      
+      <h2>Personal Information</h2>
+      
+      <div class="form-group">
+        <label for="first_name">First Name *</label>
+        <input type="text" id="first_name" data-automation-id="legalNameForm_firstName" class="input-text" required placeholder="First Name" />
+      </div>
+
+      <div class="form-group">
+        <label for="last_name">Last Name *</label>
+        <input type="text" id="last_name" data-automation-id="legalNameForm_lastName" class="input-text" required placeholder="Last Name" />
+      </div>
+
+      <div class="form-group">
+        <label for="email">Email Address *</label>
+        <input type="email" id="email" data-automation-id="contactInformation_email" class="input-text" required placeholder="email@example.com" />
+      </div>
+
+      <div class="form-group">
+        <label for="phone">Phone Number *</label>
+        <input type="tel" id="phone" data-automation-id="phone-number" class="input-text" required placeholder="Phone Number" />
+      </div>
+
+      <h2>Dropdown Selections</h2>
+
+      <div class="form-group">
+        <label>How did you hear about us? *</label>
+        <!-- Custom Workday combobox structure -->
+        <div class="wd-combobox" role="combobox" aria-haspopup="true" data-automation-id="select-selected-item" id="source-dropdown">
+          <span id="selected-source-label">Select...</span>
+          <span>▼</span>
+          <div class="wd-options-list" id="source-options" role="listbox">
+            <div class="wd-option" role="option" id="listbox-option-1">LinkedIn</div>
+            <div class="wd-option" role="option" id="listbox-option-2">GitHub</div>
+            <div class="wd-option" role="option" id="listbox-option-3">Company Website</div>
+            <div class="wd-option" role="option" id="listbox-option-4">Referral</div>
+          </div>
+        </div>
+      </div>
+
+      <h2>Repeatable Work Experience</h2>
+      <div id="experience-container">
+        <!-- Experience Entry 0 -->
+        <div class="repeatable-section" data-automation-id="workExperienceSection">
+          <div style="font-weight: bold; font-size: 13px; margin-bottom: 10px; color: #555;">Experience Entry 1</div>
+          
+          <div class="form-group">
+            <label>Job Title</label>
+            <input type="text" class="input-text" placeholder="Title" />
+          </div>
+          
+          <div class="form-group">
+            <label>Company</label>
+            <input type="text" class="input-text" placeholder="Company Name" />
+          </div>
+          
+          <div class="form-group">
+            <label>Role Description</label>
+            <textarea class="input-text" style="height: 60px; font-family: inherit;" placeholder="Describe responsibilities"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <h2>Questionnaire</h2>
+      
+      <div class="form-group" style="flex-direction: row; gap: 10px; align-items: center;">
+        <input type="checkbox" id="work_auth" style="transform: scale(1.2);" />
+        <label for="work_auth">Are you legally authorized to work in the United States? *</label>
+      </div>
+
+      <div class="form-group">
+        <label>Will you now or in the future require visa sponsorship? *</label>
+        <div style="display: flex; gap: 20px; align-items: center; margin-top: 4px;">
+          <label style="font-weight: normal; display: flex; align-items: center; gap: 4px;">
+            <input type="radio" name="sponsorship" value="Yes" /> Yes
+          </label>
+          <label style="font-weight: normal; display: flex; align-items: center; gap: 4px;">
+            <input type="radio" name="sponsorship" value="No" /> No
+          </label>
+        </div>
+      </div>
+
+      <div class="btn-group">
+        <button type="button" class="btn btn-secondary">Back</button>
+        <button type="submit" class="btn btn-primary" data-automation-id="bottom-navigation-next-button">Save and Continue</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    // Custom combobox click simulation logic
+    const combobox = document.getElementById('source-dropdown');
+    const optionsList = document.getElementById('source-options');
+    const label = document.getElementById('selected-source-label');
+
+    combobox.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = optionsList.style.display === 'block';
+      optionsList.style.display = isOpen ? 'none' : 'block';
+    });
+
+    document.querySelectorAll('.wd-option').forEach(option => {
+      option.addEventListener('click', (e) => {
+        e.stopPropagation();
+        label.textContent = option.textContent;
+        optionsList.style.display = 'none';
+        
+        // Dispatch custom change event to trigger virtual DOM mappings
+        combobox.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    });
+
+    document.addEventListener('click', () => {
+      optionsList.style.display = 'none';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Workday AI Autofill",
+  "version": "0.1.0",
+  "description": "Automate Workday job applications using AI-powered resume understanding.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://*.myworkdayjobs.com/*",
+    "*://*.myworkday.com/*",
+    "*://*.wd3.myworkday.com/*",
+    "*://*.wd5.myworkday.com/*",
+    "*://*.workday.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.myworkdayjobs.com/*",
+        "*://*.myworkday.com/*",
+        "*://*.wd3.myworkday.com/*",
+        "*://*.wd5.myworkday.com/*",
+        "*://*.workday.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
