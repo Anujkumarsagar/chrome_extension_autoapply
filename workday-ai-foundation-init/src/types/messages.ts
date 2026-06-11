@@ -35,6 +35,29 @@ export interface SyncStatusPayload {
   error?: string;
 }
 
+export interface ExecutionCommand {
+  action: 'type' | 'select' | 'checkbox' | 'radio' | 'date';
+  fieldId: string;
+  value: string | boolean | null;
+  reasoning?: string;
+}
+
+export interface GenerateExecutionPlanPayload {
+  fields: Array<{
+    id: string;
+    label: string;
+    description?: string;
+    type: string;
+    required: boolean;
+    automationId?: string;
+    options?: string[];
+  }>;
+  resumeJson: StructuredResume;
+  containerHtml?: string;
+  errorContext?: string;
+}
+
+
 /**
  * Union definition of all possible extension messages.
  */
@@ -45,7 +68,8 @@ export type ExtensionMessage =
   | { type: MessageType.PING; payload?: never }
   | { type: MessageType.PARSE_RESUME; payload: ParseResumePayload }
   | { type: MessageType.ANALYZE_QUESTION; payload: AnalyzeQuestionPayload }
-  | { type: MessageType.SYNC_STATUS; payload: SyncStatusPayload };
+  | { type: MessageType.SYNC_STATUS; payload: SyncStatusPayload }
+  | { type: MessageType.GENERATE_EXECUTION_PLAN; payload: GenerateExecutionPlanPayload };
 
 /**
  * Standard structured response for message handlers.
@@ -55,3 +79,4 @@ export interface ExtensionResponse<T = unknown> {
   data?: T;
   error?: string;
 }
+

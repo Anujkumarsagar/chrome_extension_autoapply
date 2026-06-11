@@ -1,6 +1,6 @@
 import { createLogger } from '../utils/logger';
 import { MessageType } from '../constants/messageTypes';
-import { ExtensionMessage, ExtensionResponse } from '../types/messages';
+import { ExtensionMessage, ExtensionResponse, ExecutionCommand } from '../types/messages';
 import { StructuredResume } from '../types/resume';
 import { detectFormFields, FieldInfo } from './elementDetector';
 import { mapFieldHeuristically } from './heuristicMapper';
@@ -107,107 +107,103 @@ function cleanDOMContext(element: HTMLElement): string {
 
 // ─── LLM Bridge ────────────────────────────────────────────────────────────────
 /**
- * Asks the background service-worker to run the ANALYZE_QUESTION handler.
- * Wakes the service worker if dormant, retries up to 2 times on failure.
- * Returns { value, confidence, reasoning } or null on total failure.
+ * Requests the background worker to invoke the GENERATE_EXECUTION_PLAN LLM handler.
+ * Pre-scrapes dropdown options and sanitizes the page DOM context to reduce tokens.
  */
-async function queryAIForField(
-  field: FieldInfo,
+async function queryAIForExecutionPlan(
+  fields: FieldInfo[],
   resumeJson: StructuredResume,
-  availableOptions?: string[]
-): Promise<{ value: string | null; confidence: number; reasoning: string } | null> {
-  // Clean HTML to save tokens
-  const containerHtml = field.container
-    ? cleanDOMContext(field.container)
-    : undefined;
+  errorContext?: string
+): Promise<ExecutionCommand[] | null> {
+  const formContainer = document.querySelector('form, main, [role="main"]') || document.body;
+  const containerHtml = cleanDOMContext(formContainer as HTMLElement);
 
-  // Scan all fields on the page to build the context of neighboring fields
-  const allFields = detectFormFields();
-  const pageContext = allFields
-    .map(f => {
-      let val = '';
-      if (f.element) {
-        if (f.type === 'text' || f.type === 'textarea') {
-          val = (f.element as HTMLInputElement).value || '';
-        } else if (f.type === 'select') {
-          const selectVal = f.element.textContent || '';
-          const lowerVal = selectVal.trim().toLowerCase();
-          // Exclude default placeholder prompts
-          if (lowerVal !== '' && !lowerVal.includes('select') && !lowerVal.includes('search')) {
-            val = selectVal;
-          }
-        } else if (f.type === 'checkbox') {
-          val = (f.element as HTMLInputElement).checked ? 'checked' : 'unchecked';
-        } else if (f.type === 'radio') {
-          const checked = f.container.querySelector('input[type="radio"]:checked');
-          val = checked ? (checked as HTMLInputElement).value || 'selected' : '';
-        }
+  // Scrape dropdown options sequentially to avoid race conditions with DOM events
+  const fieldsPayload = [];
+  for (const field of fields) {
+    let options: string[] | undefined;
+    if (field.type === 'select') {
+      try {
+        options = await scrapeDropdownOptions(field);
+        logToExtension('debug', `Scraped ${options.length} options for select dropdown: "${field.label}"`);
+      } catch (err) {
+        logToExtension('warn', `Failed to scrape options for "${field.label}": ${err}`);
       }
-      return {
-        label: f.label,
-        value: val.trim()
-      };
-    })
-    .filter(ctx => ctx.label !== field.label && ctx.value !== ''); // exclude current field and empty fields
+    }
+
+    // Check for local validation errors in container
+    const localErrorEl = field.container?.querySelector('[class*="error"], [id*="error"], [data-automation-id*="errorHeading"], [role="alert"], [class*="alert"]');
+    const localErrorText = localErrorEl && localErrorEl.textContent ? localErrorEl.textContent.trim() : '';
+    const descriptionText = field.description 
+      ? (localErrorText ? `${field.description} (Validation Error: ${localErrorText})` : field.description)
+      : (localErrorText ? `(Validation Error: ${localErrorText})` : undefined);
+
+    fieldsPayload.push({
+      id: field.id,
+      label: field.label,
+      description: descriptionText,
+      type: field.type,
+      required: field.required,
+      automationId: field.automationId,
+      options
+    });
+  }
 
   const payload = {
-    type: MessageType.ANALYZE_QUESTION,
+    type: MessageType.GENERATE_EXECUTION_PLAN,
     payload: {
-      label: field.label,
-      description: field.description || undefined,
-      options: availableOptions && availableOptions.length > 0 ? availableOptions : undefined,
-      containerHtml,
+      fields: fieldsPayload,
       resumeJson,
-      pageContext
+      containerHtml,
+      errorContext
     }
   };
 
-  // Wake the service worker before the real call
   await ensureServiceWorkerAlive();
 
-  const sendOnce = (): Promise<{ value: string | null; confidence: number; reasoning: string } | null> =>
+  const sendOnce = (): Promise<ExecutionCommand[] | null> =>
     new Promise((resolve) => {
       let resolved = false;
       const timer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          logToExtension('warn', `AI call timed out after 30 seconds for field "${field.label}".`);
+          logToExtension('warn', `AI Execution Plan query timed out after 35 seconds.`);
           resolve(null);
         }
-      }, 30000);
+      }, 35000);
 
       chrome.runtime.sendMessage(
         payload,
-        (response: ExtensionResponse<{ value: string | null; confidence: number; reasoning: string }>) => {
+        (response: ExtensionResponse<ExecutionCommand[]>) => {
           clearTimeout(timer);
           if (resolved) return;
           resolved = true;
 
           if (chrome.runtime.lastError) {
-            logToExtension('error', `LLM bridge error: ${chrome.runtime.lastError.message}`);
+            logToExtension('error', `LLM gateway error: ${chrome.runtime.lastError.message}`);
             resolve(null);
             return;
           }
           if (response?.success && response.data) {
             resolve(response.data);
           } else {
-            logToExtension('warn', `LLM returned no usable data for field "${field.label}": ${response?.error ?? 'empty response'}`);
+            logToExtension('warn', `LLM returned no execution plan: ${response?.error ?? 'empty response'}`);
             resolve(null);
           }
         }
       );
     });
 
-  // Retry up to 2 times on failure (handles service worker re-sleep between fields)
+  // Retry up to 2 times (handles service worker wake-up cycle transitions)
   for (let attempt = 1; attempt <= 2; attempt++) {
     const result = await sendOnce();
     if (result !== null) return result;
 
     if (attempt < 2) {
-      logToExtension('warn', `Retry ${attempt} for field "${field.label}" (service worker may have slept)...`);
-      serviceWorkerWarmedUp = false; // force re-ping on next attempt
+      logToExtension('warn', `Retry ${attempt} for execution plan generation...`);
+      serviceWorkerWarmedUp = false; // force re-ping
       await ensureServiceWorkerAlive();
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 800));
     }
   }
 
@@ -359,20 +355,36 @@ async function waitForPageTransition(): Promise<boolean> {
  * Scans and fills the active visible form fields on the current page section.
  * Returns true if processing finished successfully, false if cancelled/interrupted.
  */
-async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
+async function processCurrentPage(resume: StructuredResume, errorContext?: string): Promise<boolean> {
   logToExtension('info', `── Processing form section: "${getCurrentStepName()}" ──`);
 
-  const fields = detectFormFields();
+  let fields = detectFormFields();
+
+  // Retry page field detection if page is loading slowly
+  if (fields.length === 0) {
+    logToExtension('warn', 'No fields found. Waiting for page content to render...');
+    for (let retry = 0; retry < 10; retry++) {
+      await new Promise(r => setTimeout(r, 600));
+      fields = detectFormFields();
+      if (fields.length > 0) {
+        logToExtension('info', `Fields loaded after waiting: ${fields.length} field(s) detected.`);
+        break;
+      }
+    }
+  }
+
   logToExtension('info', `Detected ${fields.length} actionable form field(s) on this page.`);
 
   if (fields.length === 0) {
-    logToExtension('warn', 'No fields found. Waiting for page content...');
-    return true; // Return true so we poll again on transition
+    logToExtension('warn', 'No fields found after waiting. Proceeding to loop checks.');
+    return true; // Move forward to loop triggers
   }
 
   let filled = 0;
   let skipped = 0;
   let failed = 0;
+
+  const isErrorResolution = !!errorContext;
 
   // ─── Phase 1: Fast Heuristic Pass ──────────────────────────────────────────
   logToExtension('info', 'Phase 1: Running fast local heuristic matching...');
@@ -389,11 +401,29 @@ async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
     const progress = Math.round((i / fields.length) * 100);
     syncStatus('running', progress);
 
-    // Skip if field already has a value to avoid double-filling or overwriting edits
+    const labelLower = (field.label || '').toLowerCase();
+    const autoIdLower = (field.automationId || '').toLowerCase();
+
+    // Check for local container errors
+    const localErrorEl = field.container?.querySelector('[class*="error"], [id*="error"], [role="alert"], [class*="alert"]');
+    const hasLocalError = !!localErrorEl && localErrorEl.textContent && localErrorEl.textContent.trim().length > 0;
+
+    // Check if this field itself is flagged as failing validation
+    const isFieldInError = isErrorResolution && (
+      (errorContext && labelLower && errorContext.toLowerCase().includes(labelLower)) ||
+      (errorContext && autoIdLower && errorContext.toLowerCase().includes(autoIdLower)) ||
+      hasLocalError
+    );
+
+    // Skip if field already has a value, UNLESS it has an active validation error
     if (hasExistingValue(field)) {
-      logToExtension('debug', `Field "${field.label || 'unlabelled'}" already has a value. Skipping.`);
-      skipped++;
-      continue;
+      if (!isFieldInError) {
+        logToExtension('debug', `Field "${field.label || 'unlabelled'}" already has a value. Skipping.`);
+        skipped++;
+        continue;
+      } else {
+        logToExtension('info', `Re-evaluating field "${field.label}" because it has an active validation error.`);
+      }
     }
 
     // Heuristic mapping
@@ -426,76 +456,61 @@ async function processCurrentPage(resume: StructuredResume): Promise<boolean> {
     }
   }
 
-  // ─── Phase 2: AI / LLM Pass ────────────────────────────────────────────────
+  // ─── Phase 2: AI / LLM Page Execution Plan Pass ─────────────────────────────
   if (fieldsToQueryAI.length > 0) {
-    logToExtension('info', `Phase 2: Querying AI for ${fieldsToQueryAI.length} remaining fields...`);
-    let consecutiveErrors = 0;
+    logToExtension('info', `Phase 2: Querying Page Execution Plan Agent for ${fieldsToQueryAI.length} remaining fields...`);
+    
+    const plan = await queryAIForExecutionPlan(fieldsToQueryAI, resume, errorContext);
+    
+    if (!plan || !Array.isArray(plan)) {
+      logToExtension('error', 'Failed to generate execution plan or returned format was invalid. Pausing autofill.');
+      syncStatus('paused', 100);
+      return false;
+    }
 
-    for (let i = 0; i < fieldsToQueryAI.length; i++) {
+    logToExtension('info', `Executing dynamic agent plan containing ${plan.length} fill command(s)...`);
+
+    for (let i = 0; i < plan.length; i++) {
       if (shouldStop) {
         logToExtension('warn', 'Autofill stopped by user request.');
         syncStatus('paused', 100);
         return false;
       }
 
-      const field = fieldsToQueryAI[i];
+      const cmd = plan[i];
+      const field = fieldsToQueryAI.find(f => f.id === cmd.fieldId);
+      
+      if (!field) {
+        logToExtension('warn', `[Command ${i + 1}] Skipping command for unknown field ID: "${cmd.fieldId}"`);
+        continue;
+      }
 
-      // Double check if field was filled manually or by side-effects during Phase 1
+      // Check if it already has a value
       if (hasExistingValue(field)) {
         skipped++;
         continue;
       }
 
-      logToExtension('info', `[AI ${i + 1}/${fieldsToQueryAI.length}] Querying AI for field: "${field.label || field.automationId || 'unlabelled'}"`);
-
-      // For dropdowns, pre-scrape available options to give the LLM full context
-      let availableOptions: string[] | undefined;
-      if (field.type === 'select') {
-        availableOptions = await scrapeDropdownOptions(field);
-        logToExtension('debug', `Scraped ${availableOptions.length} dropdown options for LLM: [${availableOptions.slice(0, 6).join(' | ')}${availableOptions.length > 6 ? '...' : ''}]`);
+      if (cmd.value === null || cmd.value === undefined) {
+        skipped++;
+        logToExtension('debug', `[Command ${i + 1}] Agent skipped field "${field.label}": ${cmd.reasoning || 'No value provided'}`);
+        continue;
       }
 
-      const llmResult = await queryAIForField(field, resume, availableOptions);
-
-      if (!llmResult) {
-        logToExtension('warn', `⚠ AI call failed for "${field.label}" (no response from background). Check API key / model settings.`);
-        consecutiveErrors++;
-        if (consecutiveErrors >= 3) {
-          logToExtension('error', 'Too many consecutive AI errors or timeouts. Pausing.');
-          syncStatus('paused', 100);
-          return false;
-        }
+      const valString = typeof cmd.value === 'boolean' ? (cmd.value ? 'yes' : 'no') : String(cmd.value);
+      
+      logToExtension('info', `[Command ${i + 1}/${plan.length}] Filling "${field.label}" with value: "${valString}" (Action: ${cmd.action}) — ${cmd.reasoning || ''}`);
+      
+      const success = await applyValueToField(field, valString);
+      if (success) {
+        filled++;
       } else {
-        consecutiveErrors = 0;
-        let finalValue: string | null = null;
-
-        if (llmResult.value && llmResult.confidence >= 40) {
-          finalValue = llmResult.value;
-          logToExtension('info', `AI answer for "${field.label}": "${finalValue}" (confidence: ${llmResult.confidence}%) — ${llmResult.reasoning}`);
-        } else if (!llmResult.value) {
-          logToExtension('debug', `AI returned null for "${field.label}" — field not in resume data.`);
-        } else {
-          logToExtension('warn', `AI confidence too low (${llmResult.confidence}%) for "${field.label}". Skipping.`);
-        }
-
-        // Apply value or skip
-        if (finalValue !== null && finalValue.trim() !== '') {
-          const success = await applyValueToField(field, finalValue);
-          if (success) {
-            filled++;
-            logToExtension('info', `✔ Filled "${field.label}" via AI.`);
-          } else {
-            failed++;
-            logToExtension('warn', `✘ Failed to fill "${field.label}" (value: "${finalValue}" via AI).`);
-          }
-        } else {
-          skipped++;
-          logToExtension('debug', `⟳ Skipped "${field.label}" — no usable AI value.`);
-        }
+        failed++;
+        logToExtension('warn', `✘ Failed to execute action on field "${field.label}"`);
       }
 
-      // Small delay between fields to avoid UI lag
-      await new Promise(r => setTimeout(r, 120));
+      // Small delay between executing commands to avoid page lag
+      await new Promise(r => setTimeout(r, 150));
     }
   }
 
@@ -512,22 +527,41 @@ async function runAutofillLoop(resume: StructuredResume): Promise<void> {
 
   let lastUnfilledCount = -1;
   let consecutiveRetries = 0;
+  let consecutiveErrorAttempts = 0;
+  let lastUrl = window.location.href;
+  let lastStep = getCurrentStepName();
 
   while (isRunning && !shouldStop) {
     const stepName = getCurrentStepName();
-    logToExtension('info', `Form section identified: "${stepName}"`);
+    const currentUrl = window.location.href;
+
+    // Reset error count if we navigated or moved to a new section
+    if (stepName !== lastStep || currentUrl !== lastUrl) {
+      consecutiveErrorAttempts = 0;
+      lastStep = stepName;
+      lastUrl = currentUrl;
+    }
 
     // Check for active validation errors from a previous attempt
     const errorHeading = document.querySelector('[data-automation-id="errorHeading"]');
+    let errorContext: string | undefined;
+
     if (errorHeading) {
-      const errorMsg = errorHeading.textContent || 'Validation error';
-      logToExtension('error', `Validation error active on page: "${errorMsg.trim()}". Pausing autofill for manual correction.`);
-      syncStatus('paused', 100);
-      break;
+      const errorMsg = (errorHeading.textContent || 'Validation error').trim();
+      consecutiveErrorAttempts++;
+
+      if (consecutiveErrorAttempts > 2) {
+        logToExtension('error', `Validation error active: "${errorMsg}". AI failed to resolve errors after 2 attempts. Pausing autofill for manual input.`);
+        syncStatus('paused', 100);
+        break;
+      }
+
+      logToExtension('warn', `Validation error active on page (Attempt ${consecutiveErrorAttempts}): "${errorMsg}". Retrying form resolution with AI...`);
+      errorContext = errorMsg;
     }
 
     // 1. Process and autofill the current page
-    const success = await processCurrentPage(resume);
+    const success = await processCurrentPage(resume, errorContext);
     if (!success) {
       logToExtension('warn', 'Form filling loop paused or terminated.');
       break;
@@ -584,16 +618,12 @@ async function runAutofillLoop(resume: StructuredResume): Promise<void> {
     logToExtension('info', 'Waiting for page navigation to update...');
     const transitioned = await waitForPageTransition();
     
-    // Check if transition failed because of an error heading
+    // Check if transition failed because of an error heading (log warn; the loop check on the next tick will trigger resolution)
     const errorHeadingAfterClick = document.querySelector('[data-automation-id="errorHeading"]');
     if (errorHeadingAfterClick) {
       const errorMsg = errorHeadingAfterClick.textContent || 'Validation error';
-      logToExtension('error', `Validation error active after clicking Continue: "${errorMsg.trim()}". Pausing autofill for manual correction.`);
-      syncStatus('paused', 100);
-      break;
-    }
-
-    if (!transitioned) {
+      logToExtension('warn', `Validation error active after clicking Continue: "${errorMsg.trim()}". Loop will re-evaluate on next tick.`);
+    } else if (!transitioned) {
       logToExtension('warn', 'Page navigation transition timed out. Re-evaluating current page fields...');
     }
 

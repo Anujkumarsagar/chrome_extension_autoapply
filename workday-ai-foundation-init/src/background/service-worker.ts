@@ -527,6 +527,74 @@ Instruction: Analyse the resume and provide the best possible value for this spe
       })();
       return true;
 
+    case MessageType.GENERATE_EXECUTION_PLAN:
+      (async () => {
+        try {
+          const settings = await getSettings();
+          const { fields, resumeJson, containerHtml, errorContext } = message.payload;
+
+          logger.info(`GENERATE_EXECUTION_PLAN trigger: active provider is "${settings.provider}".`);
+
+          const systemPrompt = `You are a high-accuracy job application automation agent. Your job is to output a sequence of instructions (an Execution Plan) to fill out a page form based on the candidate's structured resume data.
+
+You will be provided:
+1. The candidate's structured resume JSON.
+2. A list of form fields present on the current page. Each field has:
+   - "id": The internal field identifier (which you must reference in your commands).
+   - "label": The visible name of the field.
+   - "description": Additional helper text.
+   - "type": The field type ("text", "select", "checkbox", "radio", "date", "textarea").
+   - "required": Boolean indicating if it must be filled.
+   - "automationId": Workday identifier.
+   - "options": For select/dropdown fields, the list of valid choices.
+3. Sanity-cleaned DOM HTML context of the form container.
+
+CORE RULES:
+1. Map candidate resume details accurately to the form fields.
+2. If a field is a dropdown/select, the "value" you provide MUST match one of the available options exactly and verbatim (case-sensitive). Select the best semantic option match.
+3. For checkbox fields, value must be a boolean (true or false).
+4. Return instructions ONLY for fields where you have clear, high-confidence matching data in the resume. If you are unsure or the data is missing, return null as the value for that field command, or omit the field command.
+5. Never agree to terms, submit consents, opt-in to SMS, or fill file-upload fields. Leave these fields out of your plan.
+6. For "Summary", "Bio", or "Cover Letter" textareas, generate a professional 2-3 sentence overview based on the candidate's experience.
+
+OUTPUT CONTRACT:
+Return ONLY a valid JSON array of objects representing commands. No markdown prose or code block fences.
+Each object in the array must match this schema:
+{
+  "action": "type" | "select" | "checkbox" | "radio" | "date",
+  "fieldId": "string (the exact ID of the field from the input list)",
+  "value": "string | boolean | null",
+  "reasoning": "string (one concise sentence explaining your choice)"
+}`;
+
+          const userPrompt = `════════════════════════════════════
+CANDIDATE RESUME DATA
+════════════════════════════════════
+${JSON.stringify(resumeJson, null, 2)}
+
+════════════════════════════════════
+FORM FIELDS TO FILL
+════════════════════════════════════
+${JSON.stringify(fields, null, 2)}
+
+${containerHtml ? `\nDOM Context:\n${containerHtml}` : ''}
+${errorContext ? `\n════════════════════════════════════\nACTIVE VALIDATION ERRORS ON PAGE\n════════════════════════════════════\n${errorContext}\n\nNote: The form submission previously failed with the above validation errors. Please pay close attention to resolving these specific fields accurately based on the candidate's resume.` : ''}
+
+Instruction: Generate the execution plan array matching the schema exactly.`;
+
+
+          logger.info(`Calling LLM (${settings.provider}) to generate execution plan for ${fields.length} fields...`);
+          const plan = await callLLM(settings, systemPrompt, userPrompt, true);
+          logger.info(`Successfully generated execution plan. Actions count: ${Array.isArray(plan) ? plan.length : 0}`);
+          sendResponse({ success: true, data: plan });
+        } catch (error: any) {
+          logger.error('Error in GENERATE_EXECUTION_PLAN:', error);
+          sendResponse({ success: false, error: error.message || 'Failed to generate execution plan.' });
+        }
+      })();
+      return true;
+
+
     case MessageType.SYNC_STATUS:
       chrome.runtime.sendMessage(message, () => {
         if (chrome.runtime.lastError) { /* ignore */ }

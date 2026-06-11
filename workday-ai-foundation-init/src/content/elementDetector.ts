@@ -2,7 +2,7 @@ export interface FieldInfo {
   id: string;
   label: string;
   description: string;
-  type: 'text' | 'select' | 'checkbox' | 'radio' | 'date' | 'textarea' | 'file' | 'unknown';
+  type: 'text' | 'select' | 'checkbox' | 'radio' | 'date' | 'textarea' | 'file' | 'unknown' | 'number' | 'email' | 'tel' | 'url' | 'password';
   element: HTMLElement;
   required: boolean;
   automationId?: string;
@@ -23,37 +23,42 @@ function findLabelForElement(element: HTMLElement, container: HTMLElement): { la
   let labelText = '';
   let descText = '';
 
-  // 1. Check aria-label
-  const ariaLabel = element.getAttribute('aria-label');
-  if (ariaLabel) {
-    labelText = ariaLabel;
+  // 1. Prioritize legend or label tags inside the field container (descriptive headers)
+  if (container) {
+    const legendOrLabel = container.querySelector('legend, label');
+    if (legendOrLabel) {
+      labelText = legendOrLabel.textContent || '';
+    }
   }
 
   // 2. Check html label elements with matching 'for' attribute
-  const elementId = element.getAttribute('id');
-  if (elementId) {
-    const matchingLabel = document.querySelector(`label[for="${elementId}"]`);
-    if (matchingLabel) {
-      labelText = matchingLabel.textContent || '';
+  if (!labelText) {
+    const elementId = element.getAttribute('id');
+    if (elementId) {
+      const matchingLabel = document.querySelector(`label[for="${elementId}"]`);
+      if (matchingLabel) {
+        labelText = matchingLabel.textContent || '';
+      }
     }
   }
 
-  // 3. Search up the DOM tree inside the field container
+  // 3. Check aria-label if it's descriptive and not generic select placeholder
+  if (!labelText) {
+    const ariaLabel = element.getAttribute('aria-label');
+    if (ariaLabel && !/^\s*(select one|select value|required)\s*$/i.test(ariaLabel)) {
+      labelText = ariaLabel;
+    }
+  }
+
+  // 4. Fallback search inside container class names matching label
   if (!labelText && container) {
-    // Look for elements with label tags or classes that sound like labels
-    const labelEl = container.querySelector('label, [class*="label"], [id*="label"]');
+    const labelEl = container.querySelector('[class*="label"], [id*="label"]');
     if (labelEl) {
       labelText = labelEl.textContent || '';
     }
-
-    // Look for description/helper text
-    const descEl = container.querySelector('[class*="help"], [class*="hint"], [class*="description"], [id*="help"]');
-    if (descEl) {
-      descText = descEl.textContent || '';
-    }
   }
 
-  // 4. Fallback to placeholder
+  // 5. Fallback to placeholder
   if (!labelText) {
     const placeholder = element.getAttribute('placeholder');
     if (placeholder) {
@@ -61,8 +66,17 @@ function findLabelForElement(element: HTMLElement, container: HTMLElement): { la
     }
   }
 
+  // Look for description/helper text
+  if (container) {
+    const descEl = container.querySelector('[class*="help"], [class*="hint"], [class*="description"], [id*="help"]');
+    if (descEl) {
+      descText = descEl.textContent || '';
+    }
+  }
+
+  // Clean and strip formatting tags (e.g. asterisks)
   return {
-    label: labelText.replace(/\s+/g, ' ').trim(),
+    label: labelText.replace(/\s+/g, ' ').replace(/Required/g, '').replace(/[\*\:]/g, '').trim(),
     description: descText.replace(/\s+/g, ' ').trim()
   };
 }
@@ -77,6 +91,21 @@ function detectFieldType(element: HTMLElement): FieldInfo['type'] {
     return 'textarea';
   }
 
+  const role = element.getAttribute('role')?.toLowerCase();
+  const hasPopup = element.getAttribute('aria-haspopup')?.toLowerCase();
+
+  // Custom button dropdowns or generic select combobox controls
+  if (
+    role === 'combobox' ||
+    hasPopup === 'listbox' ||
+    hasPopup === 'true' ||
+    hasPopup === 'menu' ||
+    element.closest('[data-automation-id="select-selected-item"]') ||
+    (tagName === 'button' && hasPopup)
+  ) {
+    return 'select';
+  }
+
   if (tagName === 'input') {
     const typeAttr = element.getAttribute('type')?.toLowerCase();
     
@@ -84,6 +113,11 @@ function detectFieldType(element: HTMLElement): FieldInfo['type'] {
     if (typeAttr === 'radio') return 'radio';
     if (typeAttr === 'file') return 'file';
     if (typeAttr === 'date') return 'date';
+    if (typeAttr === 'number') return 'number';
+    if (typeAttr === 'email') return 'email';
+    if (typeAttr === 'tel') return 'tel';
+    if (typeAttr === 'url') return 'url';
+    if (typeAttr === 'password') return 'password';
     
     // Check if parent indicates date picker
     if (element.closest('[class*="DatePicker"], [id*="date"], [data-automation-id*="date"]')) {
@@ -91,13 +125,6 @@ function detectFieldType(element: HTMLElement): FieldInfo['type'] {
     }
 
     return 'text';
-  }
-
-  // Check if it is a Workday custom select/combobox
-  const role = element.getAttribute('role')?.toLowerCase();
-  const hasPopup = element.getAttribute('aria-haspopup')?.toLowerCase();
-  if (role === 'combobox' || hasPopup === 'true' || element.closest('[data-automation-id="select-selected-item"]')) {
-    return 'select';
   }
 
   return 'unknown';
@@ -108,66 +135,74 @@ function detectFieldType(element: HTMLElement): FieldInfo['type'] {
  */
 export function detectFormFields(): FieldInfo[] {
   const fields: FieldInfo[] = [];
-
-  // Workday typically wraps fields inside form group rows or containers
-  const containers = document.querySelectorAll(
-    '[class*="formRow"], [class*="form-row"], [class*="formField"], [class*="form-group"], div:has(> label)'
-  );
-
   const processedElements = new Set<HTMLElement>();
 
-  // Helper to register a field
-  const registerField = (element: HTMLElement, container: HTMLElement) => {
-    if (processedElements.has(element)) return;
+  // Query all potential interactive inputs/buttons
+  const controls = document.querySelectorAll<HTMLElement>(
+    'input, textarea, button[aria-haspopup], [role="combobox"], [data-automation-id="select-selected-item"]'
+  );
+
+  // Helper to find the nearest logical form container (fieldset, row, or group)
+  const findFieldContainer = (control: HTMLElement): HTMLElement => {
+    const matched = control.closest('fieldset, [data-automation-id*="formField-"], [class*="formRow"], [class*="form-row"], [class*="formField"], [class*="form-group"]');
+    return (matched as HTMLElement) || control.parentElement || document.body;
+  };
+
+  controls.forEach((control) => {
+    if (processedElements.has(control)) return;
     
     // Skip hidden or disabled elements
-    const style = window.getComputedStyle(element);
-    if (style.display === 'none' || style.visibility === 'hidden' || element.hasAttribute('disabled')) {
+    const style = window.getComputedStyle(control);
+    if (style.display === 'none' || style.visibility === 'hidden' || control.hasAttribute('disabled')) {
       return;
     }
 
-    const { label, description } = findLabelForElement(element, container);
-    const type = detectFieldType(element);
-    const required = element.getAttribute('required') === 'true' || 
-                     element.getAttribute('aria-required') === 'true' || 
+    const container = findFieldContainer(control);
+
+    // Skip helper inputs inside select dropdown containers to avoid duplicate registration
+    if (control.tagName.toLowerCase() === 'input' && control.getAttribute('type') === 'text') {
+      if (container.querySelector('button[aria-haspopup], [role="combobox"], [data-automation-id="select-selected-item"]')) {
+        return;
+      }
+    }
+
+    const { label, description } = findLabelForElement(control, container);
+    const type = detectFieldType(control);
+
+    // Only register the first radio button in the container to avoid duplicate groups
+    if (type === 'radio') {
+      const alreadyRegistered = fields.some(f => f.container === container && f.type === 'radio');
+      if (alreadyRegistered) {
+        processedElements.add(control);
+        return;
+      }
+    }
+
+    const required = control.getAttribute('required') === 'true' || 
+                     control.getAttribute('aria-required') === 'true' || 
                      !!container.querySelector('[class*="required"], [class*="asterisk"]');
     
-    const automationId = element.getAttribute('data-automation-id') || 
+    const automationId = control.getAttribute('data-automation-id') || 
                            container.getAttribute('data-automation-id') || 
-                           element.closest('[data-automation-id]')?.getAttribute('data-automation-id') || 
+                           control.closest('[data-automation-id]')?.getAttribute('data-automation-id') || 
                            undefined;
 
-    processedElements.add(element);
+    processedElements.add(control);
 
     fields.push({
-      id: element.id || `field_${Math.random().toString(36).substring(7)}`,
+      id: control.id || `field_${Math.random().toString(36).substring(7)}`,
       label,
       description,
       type,
-      element,
+      element: control,
       required,
       automationId,
       container
     });
-  };
-
-  // 1. Process items inside known form rows/containers
-  containers.forEach((container) => {
-    const inputControls = container.querySelectorAll<HTMLElement>('input, textarea, [role="combobox"], [data-automation-id="select-selected-item"]');
-    inputControls.forEach((control) => {
-      registerField(control, container as HTMLElement);
-    });
-  });
-
-  // 2. Global fallback scan for loose input/select/textarea controls not inside containers
-  const allControls = document.querySelectorAll<HTMLElement>('input, textarea, [role="combobox"]');
-  allControls.forEach((control) => {
-    if (!processedElements.has(control)) {
-      const container = control.parentElement || document.body;
-      registerField(control, container);
-    }
   });
 
   // Remove fields with completely empty labels (except standard upload/etc where type is obvious)
   return fields.filter(f => f.label || f.automationId || f.type === 'file');
 }
+
+
